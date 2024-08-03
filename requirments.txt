@@ -1,0 +1,6 @@
+annotated-types==0.7.0
+business-rules==1.1.1
+pydantic==2.8.2
+pydantic_core==2.20.1
+six==1.16.0
+typing_extensions==4.12.2
