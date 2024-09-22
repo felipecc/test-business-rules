@@ -1,6 +1,10 @@
 annotated-types==0.7.0
+asttokens==2.4.1
 business-rules==1.1.1
+devtools==0.12.2
+executing==2.0.1
 pydantic==2.8.2
 pydantic_core==2.20.1
+Pygments==2.18.0
 six==1.16.0
 typing_extensions==4.12.2
