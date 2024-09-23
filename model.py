@@ -59,12 +59,12 @@ class Oportunidade(BaseModel):
     dt_criacao: datetime
     dt_fechamento: datetime
     dt_estim_fechamento: datetime
-    ds_porte: str
+    ds_porte: Optional[str] = None
     ds_tipo: str
     nm_razao_social: str
-    nr_cnpj: str
-    nm_dono: str
-    nm_sponsor: str
+    nr_cnpj: Optional[str] = None
+    nm_dono: Optional[str] = None
+    nm_sponsor: Optional[str] = None
     nm_parceiro: Optional[str] = None
     ds_classificacao: str
     cd_item_oportunidade: str

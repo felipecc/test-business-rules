@@ -1,47 +1,20 @@
 import csv
 import json
 import sqlite3
-from datetime import date, datetime
-from sqlite3 import Connection
+from datetime import datetime
 from typing import Dict, List, Union, cast
+from database import get_oportunidades_dcaf
+import openpyxl
+from openpyxl.styles import Font
 
 import toolz
 from business_rules import run_all
 from business_rules.actions import BaseActions, rule_action
 from business_rules.fields import FIELD_NUMERIC, FIELD_TEXT
-from business_rules.variables import (
-    BaseVariables,
-    numeric_rule_variable,
-    string_rule_variable,
-)
-from devtools import pprint
+from business_rules.variables import BaseVariables, numeric_rule_variable, string_rule_variable
 
-from model import (
-    Action,
-    AllConditions,
-    CargoCarencia,
-    Condition,
-    DiasTolerancia,
-    ListaCargoCarencia,
-    Oportunidade,
-    OportunidadeNaoProcessada,
-    Regra,
-    Rule,
-)
-from utils import (
-    create_name_rule,
-    extract_name_rule,
-    extract_numbers_from_text,
-    is_valid_date,
-    is_valid_json,
-    parse_datetime,
-)
-
-conn = sqlite3.connect("example.db")
-cursor = conn.cursor()
-
-
-
+from model import Action, AllConditions, Condition, DiasTolerancia, ListaCargoCarencia, Oportunidade, OportunidadeNaoProcessada, Rule
+from utils import create_name_rule, extract_name_rule, extract_numbers_from_text, is_valid_date, is_valid_json, parse_datetime
 
 def mount_rule(
     *,
@@ -151,7 +124,7 @@ def read_oportunidades_from_csv(file_path: str) -> [any]:  # type: ignore
     return oportunidades
 
 
-class OportunidadeVariebles(BaseVariables):  # type: ignore
+class OportunidadeVariables(BaseVariables):  # type: ignore
     def __init__(self, oportunidade: Oportunidade) -> None:
         self.__oportunidade = oportunidade
 
@@ -176,9 +149,12 @@ class OportunidadeVariebles(BaseVariables):  # type: ignore
 
 
 class OportunidadeActions(BaseActions):  # type: ignore
-    def __init__(self, oportunidade: Oportunidade, conn: Connection) -> None:
+    def __init__(self, oportunidade: Oportunidade, conn: sqlite3.Connection, workbook: openpyxl.Workbook) -> None:
         self.__oportunidade = oportunidade
         self.__conn = conn
+        self.__workbook = workbook
+        self.__ws_processados = workbook["Processados"]
+        self.__ws_nao_processados = workbook["Não Processados"]
 
     def _get_tolerancia_dias_execucao_vencimento(
         self, dias_tolerancia: Dict[int, int], dias: int
@@ -199,7 +175,7 @@ class OportunidadeActions(BaseActions):  # type: ignore
 
         assert id, "id for rule need to be extracted"
 
-        cursor = conn.cursor()
+        cursor = self.__conn.cursor()
         cursor.execute("SELECT * FROM regra WHERE id = ?", (id,))
         row = cursor.fetchone()
 
@@ -247,7 +223,8 @@ class OportunidadeActions(BaseActions):  # type: ignore
                     nearest_day = get_nearest_day(range_days,int(primeira_parcela_dias))
                     
                     processado = {
-                        "oportunidade": self.__oportunidade.model_dump(),
+                        "oportunidade": self.__oportunidade.oportunidade_id,
+                        "nm_vertical_item": self.__oportunidade.nm_vertical_item,
                         "regra_nome": nome_regra,
                         "cargo": cargo.cargo,
                         "vlr_percentual": cargo.carencia.get(
@@ -279,8 +256,41 @@ class OportunidadeActions(BaseActions):  # type: ignore
             )
             registros_nao_processados.append(oportunidade_nao_processada)
 
-        pprint(cargos_processados_vlr_e_percentuais)
-        pprint(registros_nao_processados)
+        self._write_to_excel(cargos_processados_vlr_e_percentuais, registros_nao_processados)
+
+    def _write_to_excel(self, cargos_processados, registros_nao_processados):
+        if self.__ws_processados is None:
+            self.__ws_processados = self.__workbook.create_sheet("Processados")
+            headers_processados = ["Oportunidade ID", "Vertical Item","Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
+            self.__ws_processados.append(headers_processados)
+            for cell in self.__ws_processados[1]:
+                cell.font = Font(bold=True)
+
+        if self.__ws_nao_processados is None:
+            self.__ws_nao_processados = self.__workbook.create_sheet("Não Processados")
+            headers_nao_processados = ["Oportunidade ID", "Motivo", "Regra"]
+            self.__ws_nao_processados.append(headers_nao_processados)
+            for cell in self.__ws_nao_processados[1]:
+                cell.font = Font(bold=True)
+
+        # Write data for processados
+        for item in cargos_processados:
+            self.__ws_processados.append([
+                item["oportunidade"],
+                item["nm_vertical_item"],
+                item["regra_nome"],
+                item["cargo"],
+                item["vlr_percentual"],
+                item["vlr_comissao"]
+            ])
+
+        # Write data for não processados
+        for item in registros_nao_processados:
+            self.__ws_nao_processados.append([
+                item.oportunidade.oportunidade_id,
+                item.motivo,
+                item.regra
+            ])
 
 
 if __name__ == "__main__":
@@ -294,12 +304,29 @@ if __name__ == "__main__":
     CARGO_CARENCIA=6 
     INICIO_VIGENCIA=7
     FIM_VIGENCIA=8
-    DIAS_TOLERANCIA=9
+    DIAS_TOLERANCIA=9    
+    conn = sqlite3.connect("example.db")
+    cursor = conn.cursor()
     
-    # file_path = "oportunidades.csv"
-    file_path = "recorte.csv"
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)  # Remove the default sheet
+    
+    ws_processados = workbook.create_sheet("Processados")
+    ws_nao_processados = workbook.create_sheet("Não Processados")
+    
+    headers_processados = ["Oportunidade ID", "Vertical Item","Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
+    ws_processados.append(headers_processados)
+    for cell in ws_processados[1]:
+        cell.font = Font(bold=True)
 
-    oportunidades = read_oportunidades_from_csv(file_path)
+    headers_nao_processados = ["Oportunidade ID", "Motivo", "Regra"]
+    ws_nao_processados.append(headers_nao_processados)
+    for cell in ws_nao_processados[1]:
+        cell.font = Font(bold=True)
+    
+
+    
+    oportunidades = get_oportunidades_dcaf('01/01/2023', '01/01/2023')
 
     cursor.execute("SELECT * FROM regra")
     rows = cursor.fetchall()
@@ -335,12 +362,11 @@ if __name__ == "__main__":
     for oportunidade in oportunidades:
         run_all(
             rule_list=[rule.model_dump() for rule in mounted_rules],
-            defined_variables=OportunidadeVariebles(oportunidade),
-            defined_actions=OportunidadeActions(oportunidade, conn),
+            defined_variables=OportunidadeVariables(oportunidade),
+            defined_actions=OportunidadeActions(oportunidade, conn, workbook),
             stop_on_first_trigger=True,
         )
 
     conn.close()
+    workbook.save("oportunidades_processadas.xlsx")
 
-    # TODO fazer o mapa que pega todas as regras e gera a lista de regas
-    # TODO pegar a regra ao ser executada pelo filtro pelo id passada como parametro
