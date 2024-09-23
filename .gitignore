@@ -127,3 +127,6 @@ cython_debug/
 
 # SQLite database files
 *.db
+
+# For csv files
+*.csv
