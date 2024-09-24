@@ -2,19 +2,20 @@ import csv
 import json
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Union, cast
+from typing import Any, Dict, List, Union, cast
 from database import get_oportunidades_dcaf
-import openpyxl
+from openpyxl import Workbook
 from openpyxl.styles import Font
 
 import toolz
 from business_rules import run_all
 from business_rules.actions import BaseActions, rule_action
-from business_rules.fields import FIELD_NUMERIC, FIELD_TEXT
+from business_rules.fields import FIELD_TEXT
 from business_rules.variables import BaseVariables, numeric_rule_variable, string_rule_variable
 
 from model import Action, AllConditions, Condition, DiasTolerancia, ListaCargoCarencia, Oportunidade, OportunidadeNaoProcessada, Rule
 from utils import create_name_rule, extract_name_rule, extract_numbers_from_text, is_valid_date, is_valid_json, parse_datetime
+
 
 def mount_rule(
     *,
@@ -38,7 +39,7 @@ def mount_rule(
     return Rule(conditions=all_conditions_instance, actions=list_actions_instance)
 
 
-def parse_json_filter(json_function_filter: str) -> Dict[str, str]:
+def parse_json_filter(json_function_filter: str) -> Dict[str, Union[str, Any]]:
     if not is_valid_json(json_function_filter):
         raise ValueError("Invalid JSON format for function filter")
     return json.loads(json_function_filter)
@@ -78,10 +79,11 @@ def add_validity_period_conditions(
         Condition(name="dt_prosposta_ganha",
                   operator="less_than_or_equal_to", value=end_timestamp)
     ])
-    
-    
-def get_nearest_day(days: List[int],day:int) -> int:
+
+
+def get_nearest_day(days: List[int], day: int) -> int:
     return min(days, key=lambda x: (abs(x - day), x))
+
 
 def read_oportunidades_from_csv(file_path: str) -> [any]:  # type: ignore
     oportunidades = []
@@ -149,7 +151,7 @@ class OportunidadeVariables(BaseVariables):  # type: ignore
 
 
 class OportunidadeActions(BaseActions):  # type: ignore
-    def __init__(self, oportunidade: Oportunidade, conn: sqlite3.Connection, workbook: openpyxl.Workbook) -> None:
+    def __init__(self, oportunidade: Oportunidade, conn: sqlite3.Connection, workbook: Workbook) -> None:
         self.__oportunidade = oportunidade
         self.__conn = conn
         self.__workbook = workbook
@@ -215,13 +217,14 @@ class OportunidadeActions(BaseActions):  # type: ignore
         )
 
         if primeira_parcela_dias:
-            
+
             if len(cargos_carencia.cargos) > 1:
                 for cargo in cargos_carencia.cargos:
-                    
+
                     range_days = [int(k) for k in cargo.carencia.keys()]
-                    nearest_day = get_nearest_day(range_days,int(primeira_parcela_dias))
-                    
+                    nearest_day = get_nearest_day(
+                        range_days, int(primeira_parcela_dias))
+
                     processado = {
                         "oportunidade": self.__oportunidade.oportunidade_id,
                         "nm_vertical_item": self.__oportunidade.nm_vertical_item,
@@ -256,65 +259,80 @@ class OportunidadeActions(BaseActions):  # type: ignore
             )
             registros_nao_processados.append(oportunidade_nao_processada)
 
-        self._write_to_excel(cargos_processados_vlr_e_percentuais, registros_nao_processados)
+        self._write_to_excel(
+            cargos_processados_vlr_e_percentuais, registros_nao_processados)
 
-    def _write_to_excel(self, cargos_processados, registros_nao_processados):
+    def _create_header(self, workbook: Workbook, headers: List[str]) -> None:
+        workbook.append(headers)
+        for cell in workbook[1]:
+            cell.font = Font(bold=True)
+
+    def _write_to_excel(self, cargos_processados: List[Dict[str, Any]], registros_nao_processados: List[OportunidadeNaoProcessada]) -> None:
+        SHEET_NAME_PROCESSED = "Processados"
+        SHEET_NAME_UNPROCESSED = "Não Processados"
+        HEADERS_PROCESSED = ["Oportunidade ID", "Vertical Item",
+                             "Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
+        HEADERS_UNPROCESSED = ["Oportunidade ID", "Motivo", "Regra"]
+
         if self.__ws_processados is None:
-            self.__ws_processados = self.__workbook.create_sheet("Processados")
-            headers_processados = ["Oportunidade ID", "Vertical Item","Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
-            self.__ws_processados.append(headers_processados)
-            for cell in self.__ws_processados[1]:
-                cell.font = Font(bold=True)
+            self.__ws_processados = self.__workbook.create_sheet(
+                SHEET_NAME_PROCESSED)
+            self._create_header(self.__ws_processados, HEADERS_PROCESSED)
 
         if self.__ws_nao_processados is None:
-            self.__ws_nao_processados = self.__workbook.create_sheet("Não Processados")
-            headers_nao_processados = ["Oportunidade ID", "Motivo", "Regra"]
-            self.__ws_nao_processados.append(headers_nao_processados)
-            for cell in self.__ws_nao_processados[1]:
-                cell.font = Font(bold=True)
+            self.__ws_nao_processados = self.__workbook.create_sheet(
+                SHEET_NAME_UNPROCESSED)
+            self._create_header(self.__ws_nao_processados, HEADERS_UNPROCESSED)
 
         # Write data for processados
-        for item in cargos_processados:
-            self.__ws_processados.append([
+        processados_data = [
+            [
                 item["oportunidade"],
                 item["nm_vertical_item"],
                 item["regra_nome"],
                 item["cargo"],
                 item["vlr_percentual"],
                 item["vlr_comissao"]
-            ])
+            ] for item in cargos_processados
+        ]
+        for row in processados_data:
+            self.__ws_processados.append(row)
 
         # Write data for não processados
-        for item in registros_nao_processados:
-            self.__ws_nao_processados.append([
+        nao_processados_data = [
+            [
                 item.oportunidade.oportunidade_id,
                 item.motivo,
                 item.regra
-            ])
+            ] for item in registros_nao_processados
+        ]
+        for row in nao_processados_data:
+            self.__ws_nao_processados.append(row)
 
 
 if __name__ == "__main__":
-    
-    ID=0
-    NOME=1 
-    TIPO=2
-    DATA_CRIACAO=3
-    DATA_PUBLICACAO=4 
-    FUNCAO_FILTRO=5
-    CARGO_CARENCIA=6 
-    INICIO_VIGENCIA=7
-    FIM_VIGENCIA=8
-    DIAS_TOLERANCIA=9    
+
+    ID = 0
+    NOME = 1
+    TIPO = 2
+    DATA_CRIACAO = 3
+    DATA_PUBLICACAO = 4
+    FUNCAO_FILTRO = 5
+    CARGO_CARENCIA = 6
+    INICIO_VIGENCIA = 7
+    FIM_VIGENCIA = 8
+    DIAS_TOLERANCIA = 9
     conn = sqlite3.connect("example.db")
     cursor = conn.cursor()
-    
-    workbook = openpyxl.Workbook()
+
+    workbook = Workbook()
     workbook.remove(workbook.active)  # Remove the default sheet
-    
+
     ws_processados = workbook.create_sheet("Processados")
     ws_nao_processados = workbook.create_sheet("Não Processados")
-    
-    headers_processados = ["Oportunidade ID", "Vertical Item","Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
+
+    headers_processados = ["Oportunidade ID", "Vertical Item",
+                           "Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
     ws_processados.append(headers_processados)
     for cell in ws_processados[1]:
         cell.font = Font(bold=True)
@@ -323,16 +341,14 @@ if __name__ == "__main__":
     ws_nao_processados.append(headers_nao_processados)
     for cell in ws_nao_processados[1]:
         cell.font = Font(bold=True)
-    
 
-    
     oportunidades = get_oportunidades_dcaf('01/01/2023', '01/01/2023')
 
     cursor.execute("SELECT * FROM regra")
     rows = cursor.fetchall()
-    
+
     mounted_rules: List[Rule] = []
-    
+
     for row in rows:
         name_rule = create_name_rule(row[ID], row[NOME])
 
@@ -357,7 +373,6 @@ if __name__ == "__main__":
             validity_period_start=validity_period_start,
             validity_period_end=validity_period_end,
         ))
-        
 
     for oportunidade in oportunidades:
         run_all(
@@ -369,4 +384,3 @@ if __name__ == "__main__":
 
     conn.close()
     workbook.save("oportunidades_processadas.xlsx")
-

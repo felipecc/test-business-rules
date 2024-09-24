@@ -1,14 +1,16 @@
-import oracledb
+from contextlib import contextmanager
+from oracledb import connect, Connection, Error
 import os
 from dotenv import load_dotenv
 from jinja2 import Template
-from typing import List
+from typing import Any, Dict, Generator, List, Mapping, Optional, Tuple, Union
 from model import Oportunidade
+from pathlib import Path
 
 load_dotenv()
 
 
-def get_db_credentials(user_env_var: str, password_env_var: str, dsn_env_var: str):
+def get_db_credentials(user_env_var: str, password_env_var: str, dsn_env_var: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Retrieve database credentials from environment variables.
 
@@ -19,7 +21,9 @@ def get_db_credentials(user_env_var: str, password_env_var: str, dsn_env_var: st
     dsn = os.getenv(dsn_env_var)
     return user, password, dsn
 
-def create_oracle_connection(user, password, dsn):
+
+@contextmanager
+def create_oracle_connection(user: str, password: str, dsn: str) -> Generator[Connection, None, None]:
     """
     Create a connection to the Oracle database.
 
@@ -30,29 +34,33 @@ def create_oracle_connection(user, password, dsn):
     """
     try:
         # Example DSN: "hostname:port/service_name"
-        connection = oracledb.connect(user=user, password=password, dsn=dsn)
-        print("Successfully connected to Oracle Database")
-        return connection
-    except oracledb.Error as e:
+        connection = connect(user=user, password=password, dsn=dsn)
+        yield connection
+    except Error as e:
         print(f"Error connecting to Oracle Database: {e}")
         return None
+    finally:
+        if connection:
+            connection.close()
 
-def execute_query(connection, query, params=None):
+
+def execute_query(connection: Connection | None, query: str, params: Dict[str, Any] | None = None) -> List | None:
+    if not connection:
+        raise Exception('Connection is none')
+
     try:
-        cursor = connection.cursor()
-        cursor.execute(query, params or {})
-        cursor.rowfactory = lambda *args: dict(zip([str.lower(d[0]) for d in cursor.description], args))
-        results = cursor.fetchall()
-        cursor.close()
-        return results
-    except oracledb.Error as e:
+        with connection.cursor() as cursor:
+            cursor.execute(query, params or {})
+            cursor.rowfactory = lambda *args: dict(
+                zip([str.lower(d[0]) for d in cursor.description], args))
+            results = cursor.fetchall()
+            return results
+    except Error as e:
         print(f"Error executing query: {e}")
         return None
 
 
-
-
-def read_query_from_file(file_path: str, **kwargs) -> str:
+def read_query_from_file(file_path: str, **kwargs: Any) -> str:
     """
     Read a SQL query from a file and render it using Jinja2.
 
@@ -60,11 +68,12 @@ def read_query_from_file(file_path: str, **kwargs) -> str:
     :param kwargs: Parameters to be passed to the Jinja2 template
     :return: Rendered SQL query as a string
     """
-    with open(file_path, 'r') as file:
-        template = Template(file.read())
+    file_content = Path(file_path).read_text()
+    template = Template(file_content)
     return template.render(**kwargs)
 
-def get_oportunidades_dcaf(data_inicial: str, data_final: str) -> List[Oportunidade]:
+
+def get_oportunidades_dcaf(data_inicial: str, data_final: str) -> List[Oportunidade] | None:
     """
     Retrieve oportunidades from DCAF using the provided date range.
 
@@ -72,13 +81,18 @@ def get_oportunidades_dcaf(data_inicial: str, data_final: str) -> List[Oportunid
     :param data_final: End date for the query
     :return: List of oportunidades
     """
-    user, password, dsn = get_db_credentials('DCAF_USER', 'DCAF_PASSWORD', 'DCAF_DSN')
-    connection = create_oracle_connection(user, password, dsn)
-    
-    if connection:
-        query = read_query_from_file('dcaf.sql', data_inicial=data_inicial, data_final=data_final)
+    user, password, dsn = get_db_credentials(
+        'DCAF_USER', 'DCAF_PASSWORD', 'DCAF_DSN')
+
+    if (not user or not password or not dsn):
+        raise Exception('user, password and dsn to be informed')
+
+    with create_oracle_connection(user, password, dsn) as connection:
+        query = read_query_from_file(
+            'dcaf.sql', data_inicial=data_inicial, data_final=data_final)
         results = execute_query(connection, query)
-        connection.close()
+        if not results:
+            return None
         return [Oportunidade(**r) for r in results]
     return None
 
