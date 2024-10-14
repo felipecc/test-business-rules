@@ -3,9 +3,10 @@ import json
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Union, cast
-from database import get_oportunidades_dcaf
+from database import get_oportunidades_dcaf, get_recebimento_benner, get_dados_provisionamento, get_dados_recebimento, read_query_from_file
 from openpyxl import Workbook
 from openpyxl.styles import Font
+import polars as pl
 
 import toolz
 from business_rules import run_all
@@ -13,8 +14,25 @@ from business_rules.actions import BaseActions, rule_action
 from business_rules.fields import FIELD_TEXT
 from business_rules.variables import BaseVariables, numeric_rule_variable, string_rule_variable
 
-from model import Action, AllConditions, Condition, DiasTolerancia, ListaCargoCarencia, Oportunidade, OportunidadeNaoProcessada, Rule
+from model import Action, AllConditions, Condition, DiasTolerancia, ListaCargoCarencia, Oportunidade, OportunidadeNaoProcessada, Recebimento, Rule
 from utils import create_name_rule, extract_name_rule, extract_numbers_from_text, is_valid_date, is_valid_json, parse_datetime
+
+
+decaf_benner = {
+    "Manutenção": ["MANUTENÇÃO", "MANUTENÇÃO - MERCADO EXTERNO"],
+    "Licença de Uso": ["LICENÇAS DE USO", "LICENÇAS DE USO - MERCADO EXTERNO"],
+    "Consultoria": [
+        "PRESTAÇÃO DE SERVIÇOS MERCADO INTERNO",
+        "CONSULTORIA E IMPLANTAÇÃO",
+        "CONSULTORIA E IMPLANTAÇÃO - MERCADO EXTERNO"
+    ],
+    "Subscrição": ["SUBSCRIÇÃO - MERCADO EXTERNO"],
+    "Serviços": ["SERVIÇOS TECNICOS - MERCADO EXTERNO","SERVIÇOS SISTEMAS"],
+    "Customização": ["SERVIÇOS SISTEMAS"],
+    "Locação": ["LOCAÇÃO DE SISTEMAS"],
+    "Outsourcing": ["OUTSOURCING"],
+    "SAAS": ["SUBSCRIÇÃO"]
+}
 
 
 def mount_rule(
@@ -80,50 +98,8 @@ def add_validity_period_conditions(
                   operator="less_than_or_equal_to", value=end_timestamp)
     ])
 
-
 def get_nearest_day(days: List[int], day: int) -> int:
     return min(days, key=lambda x: (abs(x - day), x))
-
-
-def read_oportunidades_from_csv(file_path: str) -> [any]:  # type: ignore
-    oportunidades = []
-    with open(file_path, mode="r", encoding="utf-8") as file:
-        csv_reader = csv.DictReader(file, delimiter=";")
-        for row in csv_reader:
-            oportunidade = Oportunidade(
-                oportunidade_id=row["OPORTUNIDADE_ID"],
-                codigo_oportunidade=row["CODIGO_OPORTUNIDADE"],
-                ds_contrato_benner=row["DS_CONTRATO_BENNER"],
-                tp_status=row["TP_STATUS"],
-                nm_vertical=row["NM_VERTICAL"],
-                nm_regional=row["NM_REGIONAL"],
-                dt_criacao=parse_datetime(row["DT_CRIACAO"]),
-                dt_fechamento=parse_datetime(row["DT_FECHAMENTO"]),
-                dt_estim_fechamento=parse_datetime(row["DT_ESTIM_FECHAMENTO"]),
-                ds_porte=row["DS_PORTE"],
-                ds_tipo=row["DS_TIPO"],
-                nm_razao_social=row["NM_RAZAO_SOCIAL"],
-                nr_cnpj=row["NR_CNPJ"],
-                nm_dono=row["NM_DONO"],
-                nm_sponsor=row["NM_SPONSOR"],
-                nm_parceiro=row.get("NM_PARCEIRO"),  # Campo opcional
-                ds_classificacao=row["DS_CLASSIFICACAO"],
-                cd_item_oportunidade=row["CD_ITEM_OPORTUNIDADE"],
-                ds_item=row["DS_ITEM"],
-                nm_vertical_item=row["NM_VERTICAL_ITEM"],
-                nr_quantidade=int(row["NR_QUANTIDADE"]),
-                nr_preco_unitario=float(row["NR_PRECO_UNITARIO"]),
-                nr_preco_total=float(row["NR_PRECO_TOTAL"]),
-                nr_desconto=float(row["NR_DESCONTO"]),
-                nr_preco_total_desconto=float(row["NR_PRECO_TOTAL_DESCONTO"]),
-                dt_modificacao_item=parse_datetime(row["DT_MODIFICACAO_ITEM"]),
-                dt_insert=parse_datetime(row["DT_INSERT"]),
-                tp_venda=row["TP_VENDA"],
-                tp_servico=row["TP_SERVICO"],
-                ds_primeira_parcela=row["DS_PRIMEIRA_PARCELA"],
-            )
-            oportunidades.append(oportunidade)
-    return oportunidades
 
 
 class OportunidadeVariables(BaseVariables):  # type: ignore
@@ -215,49 +191,64 @@ class OportunidadeActions(BaseActions):  # type: ignore
             if self.__oportunidade.ds_primeira_parcela
             else None
         )
+        
+        group_receita_master = decaf_benner.get(self.__oportunidade.tp_servico, None)
+        
+        #Todo avaliar uma forma melhor de agrupar estes labels
+        if not len(group_receita_master) > 0:
+            raise Exception(f'Oportunidade: {self.__oportunidade.oportunidade_id} sem um grupo depara do dcaf x benner')
+        
+        recebimentos: List[Recebimento] = []
+        for group in group_receita_master:
+            registro = get_recebimento_benner(nr_pedido_fq=self.__oportunidade.ds_contrato_benner, receita_master=group)
+            if registro:
+                recebimentos.extend(registro)
+        
+        if not recebimentos:
+            return None
+        
+        for recebimento in recebimentos:
+            if primeira_parcela_dias:
+                if len(cargos_carencia.cargos) > 1:
+                    for cargo in cargos_carencia.cargos:
 
-        if primeira_parcela_dias:
+                        range_days = [int(k) for k in cargo.carencia.keys()]
+                        nearest_day = get_nearest_day(
+                            range_days, int(primeira_parcela_dias))
 
-            if len(cargos_carencia.cargos) > 1:
-                for cargo in cargos_carencia.cargos:
+                        processado = {
+                            "oportunidade": self.__oportunidade.oportunidade_id,
+                            "nm_vertical_item": self.__oportunidade.nm_vertical_item,
+                            "regra_nome": nome_regra,
+                            "cargo": cargo.cargo,
+                            "vlr_percentual": cargo.carencia.get(
+                                str(nearest_day)
+                            ),
+                            "vlr_comissao": cast(
+                                float, cargo.carencia.get(
+                                    str(nearest_day))
+                            )
+                            * recebimento.valor_liquido ,
+                        }
+                        cargos_processados_vlr_e_percentuais.append(processado)
 
-                    range_days = [int(k) for k in cargo.carencia.keys()]
-                    nearest_day = get_nearest_day(
-                        range_days, int(primeira_parcela_dias))
-
+                else:
+                    cargo = toolz.first(cargos_carencia.cargos)
                     processado = {
-                        "oportunidade": self.__oportunidade.oportunidade_id,
-                        "nm_vertical_item": self.__oportunidade.nm_vertical_item,
-                        "regra_nome": nome_regra,
                         "cargo": cargo.cargo,
-                        "vlr_percentual": cargo.carencia.get(
-                            str(nearest_day)
-                        ),
-                        "vlr_comissao": cast(
-                            float, cargo.carencia.get(
-                                str(nearest_day))
-                        )
-                        * vlr_item,
+                        "vlr_percentual": cargo.carencia.get("0"),
+                        "vlr_comissao": cast(float, cargo.carencia.get("0")) * vlr_item,
                     }
                     cargos_processados_vlr_e_percentuais.append(processado)
-
             else:
-                cargo = toolz.first(cargos_carencia.cargos)
-                processado = {
-                    "cargo": cargo.cargo,
-                    "vlr_percentual": cargo.carencia.get("0"),
-                    "vlr_comissao": cast(float, cargo.carencia.get("0")) * vlr_item,
-                }
-                cargos_processados_vlr_e_percentuais.append(processado)
-        else:
-            oportunidade_nao_processada: OportunidadeNaoProcessada = (
-                OportunidadeNaoProcessada(
-                    oportunidade=self.__oportunidade,
-                    motivo="valor no campo primeira parcela vazio",
-                    regra=f"{id} - {nome_regra}",
+                oportunidade_nao_processada: OportunidadeNaoProcessada = (
+                    OportunidadeNaoProcessada(
+                        oportunidade=self.__oportunidade,
+                        motivo="valor no campo primeira parcela vazio",
+                        regra=f"{id} - {nome_regra}",
+                    )
                 )
-            )
-            registros_nao_processados.append(oportunidade_nao_processada)
+                registros_nao_processados.append(oportunidade_nao_processada)
 
         self._write_to_excel(
             cargos_processados_vlr_e_percentuais, registros_nao_processados)
@@ -311,76 +302,96 @@ class OportunidadeActions(BaseActions):  # type: ignore
 
 
 if __name__ == "__main__":
+    
+    rs_provisionamentos = get_dados_provisionamento()
+    provisionamentos = [r.model_dump() for r in rs_provisionamentos]
+    df_provisionamentos = pl.DataFrame(provisionamentos)
+    
+    rs_recebimentos_detalhados = get_dados_recebimento()
+    recebimentos_detalhados = [r.model_dump() for r in rs_recebimentos_detalhados]
+    df_recebimentos_detalhados = pl.DataFrame(recebimentos_detalhados)
+    
+    with pl.SQLContext(
+        provisionamentos=df_provisionamentos,
+        recebimentos=df_recebimentos_detalhados,
+        eager=True
+    ) as ctx:
+        query = read_query_from_file('query_df.sql')
+        df = ctx.execute(query)
+        df.write_csv('output.csv')    
 
-    ID = 0
-    NOME = 1
-    TIPO = 2
-    DATA_CRIACAO = 3
-    DATA_PUBLICACAO = 4
-    FUNCAO_FILTRO = 5
-    CARGO_CARENCIA = 6
-    INICIO_VIGENCIA = 7
-    FIM_VIGENCIA = 8
-    DIAS_TOLERANCIA = 9
-    conn = sqlite3.connect("example.db")
-    cursor = conn.cursor()
 
-    workbook = Workbook()
-    workbook.remove(workbook.active)  # Remove the default sheet
 
-    ws_processados = workbook.create_sheet("Processados")
-    ws_nao_processados = workbook.create_sheet("Não Processados")
 
-    headers_processados = ["Oportunidade ID", "Vertical Item",
-                           "Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
-    ws_processados.append(headers_processados)
-    for cell in ws_processados[1]:
-        cell.font = Font(bold=True)
+    # ID = 0
+    # NOME = 1
+    # TIPO = 2
+    # DATA_CRIACAO = 3
+    # DATA_PUBLICACAO = 4
+    # FUNCAO_FILTRO = 5
+    # CARGO_CARENCIA = 6
+    # INICIO_VIGENCIA = 7
+    # FIM_VIGENCIA = 8
+    # DIAS_TOLERANCIA = 9
+    # conn = sqlite3.connect("example.db")
+    # cursor = conn.cursor()
 
-    headers_nao_processados = ["Oportunidade ID", "Motivo", "Regra"]
-    ws_nao_processados.append(headers_nao_processados)
-    for cell in ws_nao_processados[1]:
-        cell.font = Font(bold=True)
+    # workbook = Workbook()
+    # workbook.remove(workbook.active)  # Remove the default sheet
 
-    oportunidades = get_oportunidades_dcaf('01/01/2023', '01/01/2023')
+    # ws_processados = workbook.create_sheet("Processados")
+    # ws_nao_processados = workbook.create_sheet("Não Processados")
 
-    cursor.execute("SELECT * FROM regra")
-    rows = cursor.fetchall()
+    # headers_processados = ["Oportunidade ID", "Vertical Item",
+    #                        "Regra Nome", "Cargo", "Valor Percentual", "Valor Comissão"]
+    # ws_processados.append(headers_processados)
+    # for cell in ws_processados[1]:
+    #     cell.font = Font(bold=True)
 
-    mounted_rules: List[Rule] = []
+    # headers_nao_processados = ["Oportunidade ID", "Motivo", "Regra"]
+    # ws_nao_processados.append(headers_nao_processados)
+    # for cell in ws_nao_processados[1]:
+    #     cell.font = Font(bold=True)
 
-    for row in rows:
-        name_rule = create_name_rule(row[ID], row[NOME])
+    # oportunidades = get_oportunidades_dcaf('01/01/2023', '01/01/2023')
 
-        assert name_rule, "name_rule is not could be empty. "
+    # cursor.execute("SELECT * FROM regra")
+    # rows = cursor.fetchall()
 
-        function_filters = row[FUNCAO_FILTRO]
-        validity_period_start = (
-            datetime.strptime(
-                row[INICIO_VIGENCIA], "%Y-%m-%d") if is_valid_date(row[INICIO_VIGENCIA]) else None
-        )
+    # mounted_rules: List[Rule] = []
 
-        assert validity_period_start, "validity_period_start is not could be empty. "
+    # for row in rows:
+    #     name_rule = create_name_rule(row[ID], row[NOME])
 
-        validity_period_end = (
-            datetime.strptime(
-                row[FIM_VIGENCIA], "%Y-%m-%d") if is_valid_date(row[FIM_VIGENCIA]) else None
-        )
+    #     assert name_rule, "name_rule is not could be empty. "
 
-        mounted_rules.append(mount_rule(
-            name_rule=name_rule,
-            json_function_filter=function_filters,
-            validity_period_start=validity_period_start,
-            validity_period_end=validity_period_end,
-        ))
+    #     function_filters = row[FUNCAO_FILTRO]
+    #     validity_period_start = (
+    #         datetime.strptime(
+    #             row[INICIO_VIGENCIA], "%Y-%m-%d") if is_valid_date(row[INICIO_VIGENCIA]) else None
+    #     )
 
-    for oportunidade in oportunidades:
-        run_all(
-            rule_list=[rule.model_dump() for rule in mounted_rules],
-            defined_variables=OportunidadeVariables(oportunidade),
-            defined_actions=OportunidadeActions(oportunidade, conn, workbook),
-            stop_on_first_trigger=True,
-        )
+    #     assert validity_period_start, "validity_period_start is not could be empty. "
 
-    conn.close()
-    workbook.save("oportunidades_processadas.xlsx")
+    #     validity_period_end = (
+    #         datetime.strptime(
+    #             row[FIM_VIGENCIA], "%Y-%m-%d") if is_valid_date(row[FIM_VIGENCIA]) else None
+    #     )
+
+    #     mounted_rules.append(mount_rule(
+    #         name_rule=name_rule,
+    #         json_function_filter=function_filters,
+    #         validity_period_start=validity_period_start,
+    #         validity_period_end=validity_period_end,
+    #     ))
+
+    # for oportunidade in oportunidades:
+    #     run_all(
+    #         rule_list=[rule.model_dump() for rule in mounted_rules],
+    #         defined_variables=OportunidadeVariables(oportunidade),
+    #         defined_actions=OportunidadeActions(oportunidade, conn, workbook),
+    #         stop_on_first_trigger=True,
+    #     )
+
+    # conn.close()
+    # workbook.save("oportunidades_processadas.xlsx")

@@ -35,7 +35,7 @@ WHERE slo.cd_oportunidade = slio.cd_oportunidade
   AND InStr(Lower(tp_status),'ganha') > 0
   AND slio.ds_contrato_benner is not null
 --  AND slo.cd_oportunidade = '0065f00000NI2JvAAL'
---   AND slio.ds_contrato_benner = 'FQF/00011688/2020'
+  AND slio.ds_contrato_benner = 'FQF/00024179/2024'
 --   AND slo.dt_fechamento BETWEEN TO_DATE({{data_inicial}},'dd/mm/yyyy hh24:mi:ss') 
 --   AND TO_DATE({{data_final}},'dd/mm/yyyy hh24:mi:ss')
   AND slo.dt_fechamento BETWEEN TO_DATE('01/01/2024 00:00:00','dd/mm/yyyy hh24:mi:ss') 

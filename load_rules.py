@@ -115,6 +115,26 @@ hospitalar_outsourcing_cargo_carencia = """
 {"cargo":"Coordenador Comercial","carencia":{"0":0}}]}
 """
 
+hospitalar_servico_filtro = """
+ {"function_name": "calculo_percentual_cargo",
+  "filter":
+   [{"name": "vertical",
+    "operator": "equal_to",
+    "value" : "Hospitalar"},
+    {"name": "evento",
+    "operator": "equal_to",
+    "value" : "Serviços"}]
+}
+"""
+
+hospitalar_servico_cargo_carencia = """
+{"cargos": [
+{"cargo":"Gerente Comercial","carencia":{"0":0.01}},
+{"cargo":"Executivo Contas","carencia":{"0":0.02}},
+{"cargo":"Executivo Negocios","carencia":{"0":0.002}},
+{"cargo":"Coordenador Comercial","carencia":{"0":0.007}}]}
+"""
+
 
 hospitalar_servico_customizacao_filtro = """
  {"function_name": "calculo_percentual_cargo",
@@ -228,14 +248,26 @@ def insert_hospitalar_locacao():
         inicio_vigencia="2024-01-01",
         fim_vigencia="2024-12-31"
     )
+    
+def insert_hospitalar_servico():
+    insert(
+        nome="Hospitalar Serviços",
+        tipo="padrao",
+        funcao_filtro=text_without_breakline(hospitalar_servico_filtro),
+        cargo_carencia=text_without_breakline(hospitalar_servico_cargo_carencia),
+        inicio_vigencia="2024-01-01",
+        fim_vigencia="2024-12-31"
+    )    
 
 # Function to insert all hospitalar rules
 def insert_all_hospitalar_rules():
-    insert_hospitalar_licenca_uso()
-    insert_hospitalar_outsourcing()
-    insert_hospitalar_servico_customizacao()
-    insert_hospitalar_manutencao()
-    insert_hospitalar_locacao()
+    # insert_hospitalar_licenca_uso()
+    # insert_hospitalar_outsourcing()
+    # insert_hospitalar_servico_customizacao()
+    # insert_hospitalar_manutencao()
+    # insert_hospitalar_locacao()
+    
+    insert_hospitalar_servico()
 
 # Call this function to insert all rules
 insert_all_hospitalar_rules()
